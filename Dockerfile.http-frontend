@@ -1,0 +1,35 @@
+# Stage 1: Build the React frontend using Node + Vite
+FROM node:18-alpine as frontend-builder
+
+WORKDIR /app
+COPY cmd/talklocal/frontend/package*.json ./
+RUN npm install
+COPY cmd/talklocal/frontend ./
+RUN npm run build
+
+# Stage 2: Build the Go backend
+FROM golang:1.25.0-alpine3.22 as backend-builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o talklocal ./cmd/talklocal
+
+# Stage 3: Combine frontend + backend in one container
+FROM alpine:3.18
+
+# Install necessary packages
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+# Copy built Go binary
+COPY --from=backend-builder /app/talklocal .
+
+COPY --from=frontend-builder /app/dist /app/frontend/dist
+# Expose necessary ports
+EXPOSE 9001 3001
+
+# Default command (pass HTTP and P2P ports)
+CMD ["./talklocal", "--port=9001", "--same_string=demo", "--http-port=3001"]

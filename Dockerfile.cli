@@ -1,0 +1,23 @@
+# Use Alpine as base image with Go pre-installed
+FROM golang:1.25-alpine
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Install necessary utilities (e.g., bash)
+RUN apk add --no-cache bash git
+
+# Copy the Go module files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy the rest of the source code
+COPY . .
+
+# Build the Go binary inside the app directory
+RUN go build -o /clinode ./cmd/clinode
+
+# Set the default command to run a shell
+ENTRYPOINT ["/clinode"]
