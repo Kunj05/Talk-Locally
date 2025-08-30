@@ -4,7 +4,7 @@
 
 **Demo video**
     
-[outfile.webm](https://github.com/user-attachments/assets/7940c3cd-d245-44ee-961d-6ce7953df8fa)
+[recording.mp4](https://github.com/recording.mp4)
 
 ## What's the need for this?
 In areas hit with natural disasters tend to have no internet connectivity or in school/college labs where teacher and student can talk with each other. Using this system, any number of devices (the rescue team or the civilians) can communicate with each other as long as they are connected to a same network via wifi/hotspot/ethernet LAN.
