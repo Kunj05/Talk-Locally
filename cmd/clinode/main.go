@@ -25,22 +25,25 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	fileshare "talkLocally/internal/fileshare"
 	"talkLocally/internal/p2p"
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/ipfs/go-cid"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/network"
 )
 
 var cr *p2p.ChatRoom
 var discoveredRooms = make(map[string]bool)
 var discoveredRoomsMu sync.Mutex
+
+const FileProtocol = "/universal-connectivity-file/1"
 
 func main() {
 	port := flag.String("port", "", "port")
@@ -117,7 +120,6 @@ func main() {
 
 	// CLI Interaction
 	reader := bufio.NewReader(os.Stdin)
-	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
 		fmt.Println("\nChoose an option:")
@@ -154,8 +156,33 @@ func main() {
 				fmt.Println("Failed to join room:", err)
 				continue
 			}
+
+			h.SetStreamHandler(FileProtocol, func(s network.Stream) {
+				defer s.Close()
+				reader := bufio.NewReader(s)
+
+				fileID, _ := reader.ReadString('\n')
+				fileID = strings.TrimSpace(fileID)
+
+				fileData, _ := io.ReadAll(reader)
+				if len(fileData) == 0 {
+					fmt.Println("❌ Received empty file:", fileID)
+					return
+				}
+
+				// Save to local directory (current working directory)
+				fileName := filepath.Base(fileID)
+				err := os.WriteFile("received_"+fileName, fileData, 0644)
+				if err != nil {
+					fmt.Println("❌ Failed to save file:", fileName, err)
+					return
+				}
+
+				fmt.Println("✅ File received and saved as received_" + fileName)
+			})
+
 			fmt.Println("Joined room:", roomName)
-			fmt.Print("> Enter message (or /exit to leave): ")
+			fmt.Print("> Enter message(/exit to leave): ")
 
 			// Logging messages
 			f, err := os.OpenFile("logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -187,44 +214,69 @@ func main() {
 
 				if line == "/exit" {
 					fmt.Println("Leaving the room...")
+					if cr != nil {
+						cr.RemoveSelf()
+					}
 					break
 				}
+
 				// Handle file send command
 				if line == "/send-file" {
 					fmt.Print("Enter the file path to upload: ")
-					scanner.Scan()
-					filePath := strings.TrimSpace(scanner.Text())
+					filePath, _ := reader.ReadString('\n')
+					filePath = strings.TrimSpace(filePath)
 
-					cid, err := fileshare.AddFileToOfflineStore(filePath)
-					if err != nil {
-						log.Printf("Error adding file to store: %v", err)
+					if _, err := os.Stat(filePath); os.IsNotExist(err) {
+						fmt.Println("❌ Wrong path entered")
 						continue
 					}
 
-					fmt.Println("File uploaded successfully! CID:", cid.String())
+					file, err := os.Open(filePath)
+					if err != nil {
+						fmt.Println("❌ Failed to open the file:", err)
+						continue
+					}
+					defer file.Close()
+
+					fileID := filepath.Base(filePath)
+					_ = cr.Publish(fmt.Sprintf("📁 File available: %s", fileID))
+					fmt.Println("✅ File announced with ID:", fileID)
+
+					for _, pid := range cr.ActivePeers() {
+						if pid == h.ID() {
+							continue
+						}
+
+						stream, err := h.NewStream(ctx, pid, FileProtocol)
+						if err != nil {
+							fmt.Println("❌ Failed to create stream to", pid, ":", err)
+							continue
+						}
+
+						_, err = file.Seek(0, 0)
+						if err != nil {
+							fmt.Println("❌ Failed to seek file:", err)
+							stream.Close()
+							continue
+						}
+
+						buf := make([]byte, 32*1024) // 32 KB buffer
+						for {
+							n, err := file.Read(buf)
+							if n > 0 {
+								stream.Write(buf[:n])
+							}
+							if err != nil {
+								break
+							}
+						}
+						stream.Close()
+					}
+					fmt.Print("> Enter message(/exit to leave): ")
+
 				}
 
-				// Handle file retrieve command
-				if line == "/get-file" {
-					fmt.Print("Enter the CID of the file to retrieve: ")
-					scanner.Scan()
-					cidStr := strings.TrimSpace(scanner.Text())
-
-					fileCid, err := cid.Decode(cidStr)
-					if err != nil {
-						log.Printf("Error decoding CID '%s': %v", cidStr, err)
-						continue
-					}
-
-					fileData, err := fileshare.RetrieveFileFromStore(fileCid)
-					if err != nil {
-						log.Printf("Error retrieving file with CID '%s': %v", cidStr, err)
-						continue
-					}
-
-					fmt.Println("Retrieved file data:", string(fileData))
-				}
-
+				//Handle file retrieve command
 				if line == "" {
 					continue
 				}

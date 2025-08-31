@@ -21,9 +21,10 @@ type ChatRoom struct {
 	topic  *pubsub.Topic
 	sub    *pubsub.Subscription
 
-	roomName string
-	self     peer.ID
-	nick     string
+	roomName    string
+	self        peer.ID
+	nick        string
+	peersInRoom map[peer.ID]bool
 }
 
 // ChatMessage gets converted to/from JSON and sent in the body of pubsub messages.
@@ -34,8 +35,20 @@ type ChatMessage struct {
 }
 
 // ChatRoomBufSize is the number of incoming messages to buffer for each topic.
-
 const ChatRoomBufSize = 128
+
+func (cr *ChatRoom) ActivePeers() []peer.ID {
+	peers := make([]peer.ID, 0, len(cr.peersInRoom))
+	for pid := range cr.peersInRoom {
+		peers = append(peers, pid)
+	}
+	return peers
+}
+
+func (cr *ChatRoom) RemoveSelf() {
+	delete(cr.peersInRoom, cr.self)
+	cr.Close()
+}
 
 func (cr *ChatRoom) RoomName() string {
 	return cr.roomName
@@ -46,9 +59,9 @@ func (cr *ChatRoom) GetNickName() string {
 }
 
 func (cr *ChatRoom) Close() {
-	cr.cancel()        // ✅ stop the readLoop
 	cr.sub.Cancel()    // ✅ unsubscribe from the topic
 	close(cr.Messages) // ✅ close the message channel
+	cr.cancel()        // ✅ stop the readLoop
 }
 
 func topicName(roomName string) string {
@@ -62,37 +75,51 @@ func JoinDiscoveryRoom(ctx context.Context, ps *pubsub.PubSub, selfID peer.ID, n
 
 // JoinChatRoom tries to subscribe to the PubSub topic for the room name, returning
 // a ChatRoom on success.
+var joinedTopics = make(map[string]*pubsub.Topic) // track joined topics per process
+
 func JoinChatRoom(ctx context.Context, ps *pubsub.PubSub, selfID peer.ID, nickname string, roomName string) (*ChatRoom, error) {
-	// join the pubsub topic
-	topic, err := ps.Join(topicName(roomName))
-	if err != nil {
-		return nil, err
+	tn := topicName(roomName)
+
+	var topic *pubsub.Topic
+	var err error
+
+	// check if we already joined this topic
+	if t, ok := joinedTopics[tn]; ok {
+		topic = t
+	} else {
+		topic, err = ps.Join(tn)
+		if err != nil {
+			return nil, err
+		}
+		joinedTopics[tn] = topic
 	}
 
-	// and subscribe to it
+	// create a new subscription for this join
 	sub, err := topic.Subscribe()
 	if err != nil {
 		return nil, err
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 
 	cr := &ChatRoom{
-		ctx:      ctx,
-		cancel:   cancel,
-		ps:       ps,
-		topic:    topic,
-		sub:      sub,
-		self:     selfID,
-		nick:     nickname,
-		roomName: roomName,
-		Messages: make(chan *ChatMessage, ChatRoomBufSize),
+		ctx:         ctx,
+		cancel:      cancel,
+		ps:          ps,
+		topic:       topic,
+		sub:         sub,
+		self:        selfID,
+		nick:        nickname,
+		roomName:    roomName,
+		Messages:    make(chan *ChatMessage, ChatRoomBufSize),
+		peersInRoom: make(map[peer.ID]bool),
 	}
 
-	// start reading messages from the subscription in a loop
+	cr.peersInRoom[selfID] = true
+
 	go cr.readLoop()
 	return cr, nil
 }
-
 func (cr *ChatRoom) Publish(message string) error {
 	m := ChatMessage{
 		Message:    message,
@@ -110,19 +137,24 @@ func (cr *ChatRoom) readLoop() {
 	for {
 		msg, err := cr.sub.Next(cr.ctx)
 		if err != nil {
-			close(cr.Messages)
 			return
 		}
 		// only forward messages delivered by others
 		if msg.ReceivedFrom == cr.self {
 			continue
 		}
+		cr.peersInRoom[msg.ReceivedFrom] = true
+
 		cm := new(ChatMessage)
 		err = json.Unmarshal(msg.Data, cm)
 		if err != nil {
 			continue
 		}
 		// send valid messages onto the Messages channel
-		cr.Messages <- cm
+		select {
+		case cr.Messages <- cm:
+		case <-cr.ctx.Done():
+			return
+		}
 	}
 }
